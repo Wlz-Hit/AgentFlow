@@ -1,0 +1,12 @@
+{
+  "name": "agentflow",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Local-first orchestration runtime for coding agents",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev:desktop": "pnpm --filter @agentflow/desktop dev",
+    "typecheck": "pnpm --filter @agentflow/desktop typecheck",
+    "build": "pnpm --filter @agentflow/desktop build"
+  }
+}

@@ -1,0 +1,30 @@
+---
+description: Permanent AgentFlow architecture boundaries for Cursor agents
+alwaysApply: true
+---
+
+# AgentFlow architecture rules
+
+Read `docs/ARCHITECTURE.md` and root `AGENTS.md` before structural changes.
+
+## Non-negotiable boundaries
+
+- **Core is provider-independent.** `runtime/agentflow/core/` must not import Codex, Claude, Gemini, Electron, React, or FastAPI.
+- **Codex belongs only under adapters.** Implementation lives in `runtime/agentflow/adapters/codex/`. Do not put Codex-specific fields on Job, Workflow, Queue, Scheduler, or Event types.
+- **Python owns business logic.** Jobs, workflow engine, prompt queue, scheduler, state machine, recovery, quota, adapters, persistence, and event history live in the Python runtime.
+- **React owns presentation.** Dashboard, task/queue/timeline/settings views only. No scheduling or recovery logic in the UI.
+- **Electron owns desktop lifecycle.** Window, tray, notifications, Python process lifecycle, packaging. No AgentFlow domain logic.
+- **SQLite is local persistence.** SQLAlchemy 2 + Alembic. Do not introduce a hosted database or cloud sync without explicit architectural approval.
+- **Architecture changes require explicit approval.** Do not silently invert dependency direction, collapse packages, or “temporarily” leak provider details into core. Report the conflict instead.
+
+## Communication
+
+- Commands/queries: HTTP REST
+- Live events (future): WebSocket
+- UI talks to runtime through `apps/desktop/src/api`, not by embedding core.
+
+## Local-first and safety
+
+- No cloud accounts, telemetry, or remote control unless a task explicitly approves the architecture.
+- Never commit secrets, `.env` files, or SQLite runtime databases.
+- Do not use destructive Git commands unless the user explicitly requests them.

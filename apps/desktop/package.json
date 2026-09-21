@@ -1,0 +1,26 @@
+{
+  "name": "@agentflow/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit && vite build && tsc -p tsconfig.electron.json",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^34.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.6"
+  }
+}
