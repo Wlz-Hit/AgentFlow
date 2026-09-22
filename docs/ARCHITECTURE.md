@@ -8,7 +8,8 @@ Jobs and Run Attempts.
 This document is the source of truth for architectural boundaries. Read it before
 changing structure, ownership, or dependency direction.
 
-The project is **early-stage**. TASK-001 establishes the skeleton only. Codex is
+The project is **early-stage**. TASK-001 established the skeleton. TASK-002 adds
+the provider-independent core domain model and its lifecycle rules. Codex is
 the first planned provider implementation and **must not leak into core**.
 
 ---
@@ -243,7 +244,10 @@ Future domain tables (do not create all of these yet):
 - `quota_snapshots`
 - `settings`
 
-TASK-001 only establishes the persistence package and documents this model.
+TASK-001 established the persistence package. TASK-002 defines the domain
+objects these tables will eventually store. Those objects live in
+`runtime/agentflow/core/domain/` as plain Python. They are not SQLAlchemy
+models, and this task does not add mappings or migrations.
 
 ## 13. Why Codex must not leak into core abstractions
 
@@ -270,9 +274,97 @@ New providers should:
 The desktop UI should treat providers as selectable backends, not as separate
 products.
 
+## 15. Core domain model
+
+TASK-002 defines the shared language for the Scheduler, Prompt Queue, Recovery
+Engine, agent adapters, quota recovery, and event history. It does not
+implement those engines. The types live in `runtime/agentflow/core/domain/`
+and use dataclasses, `StrEnum`, timezone-aware datetimes, and UUIDs.
+
+```text
+Job
+ │
+ ├── WorkflowStep
+ │       │
+ │       └── QueueItem
+ │               │
+ │               ├── RunAttempt
+ │               └── RunAttempt
+ │
+ └── AgentSession references execution sessions
+```
+
+| Entity | Role |
+| --- | --- |
+| `Job` | User-level unit of work. Owns workflow steps and execution history. |
+| `WorkflowStep` | One logical step inside a job: what should happen, in sequence. |
+| `QueueItem` | Durable unit waiting to be dispatched. References a job and a step. |
+| `RunAttempt` | One try at executing a queue item. A queue item may have many attempts. |
+| `AgentSession` | Generic reference to an external coding-agent session (`adapter_id` + `external_session_id`). |
+
+Three distinctions matter:
+
+- **WorkflowStep != QueueItem.** A step is the description of work (`title`,
+  `prompt`, `sequence`). A queue item is the scheduled execution of that work
+  (`available_at`, dispatch status). Editing a step does not rewrite items
+  already queued.
+- **QueueItem != RunAttempt.** A queue item is the durable work order. A run
+  attempt is one execution of that order. Quota loss, a network failure, and a
+  later success are separate attempts (or a resumed attempt) on the same item.
+- **AgentSession != RunAttempt.** A session is the external conversation
+  AgentFlow can resume. A run attempt is a single execution that may use that
+  session. Closing a session is not the same event as completing an attempt.
+
+`external_session_id` is provider-neutral. Core does not store provider session
+field names.
+
+Status enums are separate (`JobStatus`, `WorkflowStepStatus`, `QueueItemStatus`,
+`AgentSessionStatus`, `RunAttemptStatus`) even where some names match. Legal
+moves live in transition tables. `transition_to(...)` applies them. An illegal
+move raises `InvalidStateTransition`. Direct `status` assignment after
+construction raises `DomainError`.
+
+Work items (job, step, queue item) share this graph today:
+
+```text
+CREATED
+   ↓
+READY
+   ↓
+RUNNING
+   ├── COMPLETED
+   ├── FAILED
+   ├── CANCELLED
+   ├── PAUSED
+   ├── WAITING_USER
+   └── WAITING_QUOTA
+```
+
+`PAUSED`, `WAITING_USER`, and `WAITING_QUOTA` are recoverable. From
+`WAITING_QUOTA` a work item may return to `READY` (dispatch again later) or
+`RUNNING` (continue). `COMPLETED`, `FAILED`, and `CANCELLED` are terminal: they
+do not transition back to `RUNNING`.
+
+A quota wait is an interruption, not a failure. `WAITING_QUOTA` is not `FAILED`.
+
+`RunAttempt` has no `READY` state. It starts at `CREATED`, enters `RUNNING`, and
+may pause or wait. After `WAITING_QUOTA` the same attempt may return to
+`RUNNING`. Its `started_at` stays on the original start. `finished_at` is
+recorded only for `COMPLETED`, `FAILED`, or `CANCELLED`. `failure_reason` is an
+optional provider-neutral string accepted only on the transition into `FAILED`.
+
+`AgentSession` uses `ACTIVE` while the external session is open and `CLOSED`
+when it ends cleanly. `WAITING_QUOTA` returns to `ACTIVE` after quota
+restoration. That session lifecycle is independent of whether a particular
+attempt completed.
+
+Queue items are shaped so later tasks can add `depends_on`, `condition`,
+`retry_policy`, `timeout`, and `idempotency_key` as optional fields. Those
+behaviors are not implemented here.
+
 ---
 
-## Current status (TASK-001)
+## Current status (TASK-002)
 
 Implemented:
 
@@ -281,13 +373,14 @@ Implemented:
 - React/Electron desktop skeleton
 - persistence package placeholder
 - adapter package placeholder for Codex
+- provider-independent domain model and lifecycle transitions (TASK-002)
 - this document, `AGENTS.md`, and Cursor architecture rules
 
 Not implemented (intentionally):
 
 - Codex SDK, login, quota monitoring
-- Prompt Queue / Scheduler / workflow DAG behavior
+- Prompt Queue dispatcher, Scheduler loop, Recovery Engine, workflow DAG behavior
 - Claude / Gemini support
-- domain database schema
+- SQLAlchemy mappings and migrations for the domain model
 - WebSocket event stream
 - cloud sync, accounts, payments, licensing, telemetry, auto-update

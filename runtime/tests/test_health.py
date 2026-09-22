@@ -1,8 +1,7 @@
 """Health endpoint smoke test."""
 
-from fastapi.testclient import TestClient
-
 from agentflow.api.app import create_app
+from fastapi.testclient import TestClient
 
 
 def test_health_returns_ok() -> None:
