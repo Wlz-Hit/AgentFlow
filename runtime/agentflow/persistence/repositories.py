@@ -31,6 +31,18 @@ _ACTIVE_STATUSES = (
 )
 
 
+def _translate_run_attempt_integrity(exc: IntegrityError) -> DomainError | None:
+    message = str(exc.orig) if getattr(exc, "orig", None) is not None else str(exc)
+    lowered = message.lower()
+    if "uq_run_attempts_one_active_per_queue_item" in lowered or "one_active" in lowered:
+        return DomainError(
+            "QueueItem may have at most one non-terminal RunAttempt at a time"
+        )
+    if "uq_run_attempts_queue_item_attempt_number" in lowered or "attempt_number" in lowered:
+        return DomainError("RunAttempt attempt_number must be unique per QueueItem")
+    return None
+
+
 class SqlAlchemyJobRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -72,9 +84,24 @@ class SqlAlchemyQueueItemRepository:
         self._session = session
 
     def save(self, item: QueueItem) -> None:
-        row = self._session.get(QueueItemRow, item.id)
-        self._session.add(mappers.queue_item_to_row(item, row))
-        self._session.flush()
+        step = self._session.get(WorkflowStepRow, item.workflow_step_id)
+        if step is None:
+            raise DomainError("QueueItem references an unknown WorkflowStep")
+        if step.job_id != item.job_id:
+            raise DomainError("QueueItem.job_id must match WorkflowStep.job_id")
+        try:
+            with self._session.begin_nested():
+                row = self._session.get(QueueItemRow, item.id)
+                self._session.add(mappers.queue_item_to_row(item, row))
+                self._session.flush()
+        except IntegrityError as exc:
+            message = str(exc.orig) if getattr(exc, "orig", None) is not None else str(exc)
+            lowered = message.lower()
+            if "fk_queue_items_workflow_step_job" in lowered or "foreign key" in lowered:
+                raise DomainError(
+                    "QueueItem.job_id must match WorkflowStep.job_id"
+                ) from exc
+            raise
 
     def get(self, item_id: UUID) -> QueueItem | None:
         row = self._session.get(QueueItemRow, item_id)
@@ -135,28 +162,15 @@ class SqlAlchemyRunAttemptRepository:
                 raise DomainError(
                     "QueueItem may have at most one non-terminal RunAttempt at a time"
                 )
-        row = self._session.get(RunAttemptRow, attempt.id)
-        self._session.add(mappers.run_attempt_to_row(attempt, row))
         try:
-            self._session.flush()
+            with self._session.begin_nested():
+                row = self._session.get(RunAttemptRow, attempt.id)
+                self._session.add(mappers.run_attempt_to_row(attempt, row))
+                self._session.flush()
         except IntegrityError as exc:
-            self._session.rollback()
-            message = str(exc.orig) if getattr(exc, "orig", None) is not None else str(exc)
-            lowered = message.lower()
-            if (
-                "uq_run_attempts_one_active_per_queue_item" in lowered
-                or "one_active" in lowered
-            ):
-                raise DomainError(
-                    "QueueItem may have at most one non-terminal RunAttempt at a time"
-                ) from exc
-            if (
-                "uq_run_attempts_queue_item_attempt_number" in lowered
-                or "attempt_number" in lowered
-            ):
-                raise DomainError(
-                    "RunAttempt attempt_number must be unique per QueueItem"
-                ) from exc
+            translated = _translate_run_attempt_integrity(exc)
+            if translated is not None:
+                raise translated from exc
             raise
 
     def get(self, attempt_id: UUID) -> RunAttempt | None:

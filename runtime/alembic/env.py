@@ -4,7 +4,7 @@ from logging.config import fileConfig
 
 from agentflow.persistence.models import Base
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, event, pool
 
 config = context.config
 
@@ -12,6 +12,13 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+
+def _enable_sqlite_foreign_keys(dbapi_connection: object, _connection_record: object) -> None:
+    """Enable FKs on the raw DBAPI connection before Alembic opens a transaction."""
+    cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 
 def run_migrations_offline() -> None:
@@ -32,10 +39,9 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    if connectable.dialect.name == "sqlite":
+        event.listen(connectable, "connect", _enable_sqlite_foreign_keys)
     with connectable.connect() as connection:
-        # SQLite foreign keys must be on during migrations that create FKs.
-        if connection.dialect.name == "sqlite":
-            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

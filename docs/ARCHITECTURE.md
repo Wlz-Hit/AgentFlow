@@ -367,11 +367,33 @@ Domain reconstruction rejects inconsistent timestamps (`updated_at` before
 contradicts status). Transitions may not move lifecycle timestamps backwards.
 `RunAttempt` requires `started_at` for every status except `CREATED` and
 pre-start `CANCELLED`, requires `finished_at` for terminal statuses, and
-rejects `failure_reason` unless status is `FAILED`.
+rejects `failure_reason` unless status is `FAILED`. `RunAttempt.updated_at`
+tracks the latest successful transition and is monotonic.
 
 ## 16. Durable persistence
 
-TASK-003 makes the domain model restart-safe:
+TASK-003 introduced restart-safe SQLite persistence. TASK-004 hardens it and
+adds an append-only Runtime Event Log:
+
+```text
+Current State Tables
+│
+├─────────────┐
+│             │
+↓             ↓
+Domain        Event Log
+State        append-only
+│             │
+└──────┬──────┘
+       ↓
+  Unit of Work
+       ↓
+     SQLite
+```
+
+AgentFlow uses **state + durable event history**. It is **not** currently a
+full Event Sourcing system. Current-state tables remain authoritative for
+live entity status.
 
 ```text
 Domain Core
@@ -392,6 +414,7 @@ Protocols live in `runtime/agentflow/core/ports/repositories.py`:
 - `QueueItemRepository`
 - `AgentSessionRepository`
 - `RunAttemptRepository`
+- `EventRepository`
 - `UnitOfWork`
 
 Core depends on these interfaces. SQLAlchemy implementations live only under
@@ -408,7 +431,12 @@ entities; ORM objects do not escape the persistence package.
 `SqlAlchemyUnitOfWork` binds every repository to one SQLAlchemy session.
 Application code calls `commit()` to persist a batch of changes atomically.
 Leaving the context without commit, or exiting with an exception, rolls back.
-This is intentionally small: one UoW per operation, not a framework.
+
+Expected constraint failures (duplicate attempt number, active-attempt clash,
+duplicate event id) are translated to `DomainError` inside a **SAVEPOINT**
+(`begin_nested`). That rolls back only the failing statement, not unrelated
+pending work already staged in the same UnitOfWork. Invalidating the whole
+operation remains the caller's choice via `rollback()` / exception.
 
 ### UUID representation
 
@@ -425,18 +453,32 @@ positions are never persisted.
 ### UTC timestamp strategy
 
 SQLite datetime affinity does not preserve timezone. Timestamps are stored as
-ISO-8601 UTC strings (for example `2026-09-22T08:00:00+00:00`) through
-`UtcDateTimeAsIso`. After save → close → reopen → load, domain objects still
-expose timezone-aware UTC datetimes.
+ISO-8601 UTC strings **with an explicit offset** (for example
+`2026-09-22T08:00:00+00:00`) through `UtcDateTimeAsIso`. Writes require
+timezone-aware values. Reads reject naive stored strings as corruption rather
+than guessing UTC.
+
+### Database path ownership
+
+`create_sqlite_engine` creates the parent directory of a file-backed SQLite URL
+when missing (so a clean checkout without `runtime/data/` still starts). The
+domain layer does not own filesystem paths. Location remains configurable; a
+future Electron runtime manager should supply an OS-appropriate user-data
+directory. Database files are never committed.
 
 ### SQLite foreign keys
 
-Foreign-key enforcement is enabled with `PRAGMA foreign_keys=ON` on every
-connection. Relationships:
+Foreign-key enforcement uses `PRAGMA foreign_keys=ON` on the **DBAPI connect
+event** for both the application engine and Alembic. Do not run the PRAGMA
+through the SQLAlchemy `Connection` object before Alembic owns the migration
+transaction — that previously prevented `alembic_version` from being recorded.
+
+Relationships:
 
 - `workflow_steps.job_id` → `jobs.id`
 - `queue_items.job_id` → `jobs.id`
-- `queue_items.workflow_step_id` → `workflow_steps.id`
+- `queue_items (workflow_step_id, job_id)` → `workflow_steps (id, job_id)`
+  (composite FK so a QueueItem cannot reference a step from another job)
 - `run_attempts.queue_item_id` → `queue_items.id`
 - `run_attempts.agent_session_id` → `agent_sessions.id`
 
@@ -445,6 +487,7 @@ connection. Relationships:
 Notable uniqueness constraints:
 
 - `(job_id, sequence)` on workflow steps and on queue items
+- `(id, job_id)` on workflow steps (supports the QueueItem composite FK)
 - `(adapter_id, external_session_id)` on agent sessions
 - `(queue_item_id, attempt_number)` on run attempts
 
@@ -457,20 +500,75 @@ the previous one to become terminal (`CANCELLED` or `FAILED`). Enforcement:
 2. Partial unique index `uq_run_attempts_one_active_per_queue_item` on
    `queue_item_id` where `status NOT IN ('completed', 'failed', 'cancelled')`
 
+### Migrations
+
+Schema changes ship as Alembic revisions:
+
+```text
+0001_domain_tables
+    ↓
+0002_persistence_hardening   # RunAttempt.updated_at + composite QueueItem FK
+    ↓
+0003_event_log               # append-only runtime_events
+```
+
+`metadata.create_all()` is not the production migration strategy.
+`upgrade head` is idempotent when the revision is already applied.
+
+`0002` backfills `run_attempts.updated_at` from `finished_at`, else
+`started_at`, else `created_at`. Interrupted TASK-003 rows cannot reconstruct
+the exact interruption timestamp because it was not stored before.
+
 ### Restart recovery implications
 
 Process stop/start must not lose or corrupt domain state. Durable writes go
 through the UoW commit path. Reloaded entities re-run domain validation, so
 corrupt rows fail loudly instead of silently becoming invalid in-memory
 objects. Scheduler and recovery engines (not yet implemented) will open a UoW,
-load entities, apply domain transitions, and commit.
+load entities, apply domain transitions, append control-plane events, and
+commit.
 
-Schema changes ship as Alembic revisions under `runtime/alembic/versions/`.
-`metadata.create_all()` is not the production migration strategy.
+## 17. Durable Runtime Event Log
+
+TASK-004 adds an append-only control-plane event store under
+`runtime/agentflow/core/events/` and `runtime_events` in SQLite.
+
+Purpose: Scheduler decisions, Recovery, Prompt Queue visibility, debugging,
+desktop Timeline, and future WebSocket replay
+(`list_after(position)` without exposing SQLAlchemy).
+
+This table is **not** for high-frequency provider telemetry (token deltas,
+stdout chunks). Adapters will later normalize provider streams onto a
+different mechanism.
+
+### Event model
+
+Immutable `RuntimeEvent` fields: `id`, `event_type`, `aggregate_type`,
+`aggregate_id`, `job_id`, `occurred_at`, `payload`, `correlation_id`,
+`causation_id`. Payloads must be JSON-serializable dicts (no pickle).
+
+Stable dotted names include `job.created`, `queue_item.status_changed`,
+`run_attempt.status_changed`, `quota.exhausted`, `run.resumed`, and similar
+provider-independent names.
+
+### Ordering
+
+`StoredEvent` pairs each event with a monotonic integer `position`
+(SQLite autoincrement). Event identity is a UUID (`event_id`). Ordering for
+replay uses `position`, never timestamps alone.
+
+### EventRepository
+
+Append-only port: `append`, `get`, `list_after`, `list_for_job`. No update or
+delete. Exposed on `UnitOfWork.events` so one operation can atomically change
+domain state and append lifecycle history.
+
+Automatic emission from every `transition_to` is intentionally deferred to
+future application services.
 
 ---
 
-## Current status (TASK-003)
+## Current status (TASK-004)
 
 Implemented:
 
@@ -478,14 +576,18 @@ Implemented:
 - FastAPI `/health` at the API edge
 - React/Electron desktop skeleton
 - provider-independent domain model and lifecycle transitions (TASK-002)
-- domain invariant hardening for timestamps and RunAttempt consistency
-- repository ports, SQLAlchemy adapters, Alembic domain migration (TASK-003)
+- durable SQLite persistence with repository ports (TASK-003)
+- persistence hardening: Alembic revision tracking, RunAttempt.updated_at,
+  QueueItem/WorkflowStep job consistency, savepoint constraint handling,
+  strict UTC load, default DB directory creation (TASK-004 Phase A)
+- append-only Runtime Event Log (TASK-004 Phase B)
 - this document, `AGENTS.md`, and Cursor architecture rules
 
 Not implemented (intentionally):
 
 - Codex SDK, login, quota monitoring
 - Prompt Queue dispatcher, Scheduler loop, Recovery Engine, workflow DAG behavior
+- automatic event emission from every domain transition
+- WebSocket server / live event broadcast
 - Claude / Gemini support
-- WebSocket event stream
 - cloud sync, accounts, payments, licensing, telemetry, auto-update

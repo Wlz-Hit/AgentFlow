@@ -130,6 +130,7 @@ def run_attempt_to_row(attempt: RunAttempt, row: RunAttemptRow | None = None) ->
     target.attempt_number = attempt.attempt_number
     target.status = attempt.status.value
     target.created_at = attempt.created_at
+    target.updated_at = attempt.updated_at
     target.started_at = attempt.started_at
     target.finished_at = attempt.finished_at
     target.failure_reason = attempt.failure_reason
@@ -143,6 +144,7 @@ def run_attempt_from_row(row: RunAttemptRow) -> RunAttempt:
         agent_session_id=row.agent_session_id,
         attempt_number=row.attempt_number,
         created_at=row.created_at,
+        updated_at=row.updated_at,
         started_at=row.started_at,
         finished_at=row.finished_at,
         failure_reason=row.failure_reason,

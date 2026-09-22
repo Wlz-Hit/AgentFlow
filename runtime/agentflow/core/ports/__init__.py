@@ -3,6 +3,7 @@
 from agentflow.core.ports.agent_adapter import AgentAdapter
 from agentflow.core.ports.repositories import (
     AgentSessionRepository,
+    EventRepository,
     JobRepository,
     QueueItemRepository,
     RunAttemptRepository,
@@ -13,6 +14,7 @@ from agentflow.core.ports.repositories import (
 __all__ = [
     "AgentAdapter",
     "AgentSessionRepository",
+    "EventRepository",
     "JobRepository",
     "QueueItemRepository",
     "RunAttemptRepository",

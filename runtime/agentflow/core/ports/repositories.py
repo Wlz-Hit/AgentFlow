@@ -12,6 +12,7 @@ from agentflow.core.domain.job import Job
 from agentflow.core.domain.queue_item import QueueItem
 from agentflow.core.domain.run_attempt import RunAttempt
 from agentflow.core.domain.workflow_step import WorkflowStep
+from agentflow.core.events import RuntimeEvent, StoredEvent
 
 
 class JobRepository(Protocol):
@@ -60,11 +61,25 @@ class RunAttemptRepository(Protocol):
     def get_active_for_queue_item(self, queue_item_id: UUID) -> RunAttempt | None: ...
 
 
+class EventRepository(Protocol):
+    """Append-only durable control-plane event store."""
+
+    def append(self, event: RuntimeEvent) -> StoredEvent: ...
+
+    def get(self, event_id: UUID) -> StoredEvent | None: ...
+
+    def list_after(self, position: int) -> list[StoredEvent]: ...
+
+    def list_for_job(self, job_id: UUID) -> list[StoredEvent]: ...
+
+
 class UnitOfWork(Protocol):
     """Atomic boundary for one application operation.
 
     Repositories share one underlying transaction. ``commit`` persists every
     change made through the repositories; ``rollback`` discards them.
+    Constraint translation inside a repository must not roll back unrelated
+    work already pending in the same UnitOfWork; use savepoints instead.
     """
 
     jobs: JobRepository
@@ -72,6 +87,7 @@ class UnitOfWork(Protocol):
     queue_items: QueueItemRepository
     agent_sessions: AgentSessionRepository
     run_attempts: RunAttemptRepository
+    events: EventRepository
 
     def commit(self) -> None: ...
 

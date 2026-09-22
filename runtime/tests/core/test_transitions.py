@@ -114,6 +114,7 @@ def _attempt(status: RunAttemptStatus) -> RunAttempt:
         agent_session_id=uuid4(),
         attempt_number=1,
         created_at=T0,
+        updated_at=T0,
         started_at=started,
         finished_at=finished,
         status=status,
@@ -478,6 +479,7 @@ def test_run_attempt_rejects_inconsistent_reconstruction(
             agent_session_id=uuid4(),
             attempt_number=1,
             created_at=T0,
+            updated_at=T0,
             status=status,
             **kwargs,
         )
@@ -490,6 +492,7 @@ def test_cancelled_before_start_is_valid() -> None:
         agent_session_id=uuid4(),
         attempt_number=1,
         created_at=T0,
+        updated_at=T1,
         finished_at=T1,
         status=RunAttemptStatus.CANCELLED,
     )
@@ -504,8 +507,19 @@ def test_failed_without_failure_reason_is_allowed() -> None:
         agent_session_id=uuid4(),
         attempt_number=1,
         created_at=T0,
+        updated_at=T1,
         started_at=T0,
         finished_at=T1,
         status=RunAttemptStatus.FAILED,
     )
     assert attempt.failure_reason is None
+
+
+def test_run_attempt_cannot_resume_before_previous_transition() -> None:
+    attempt = create_run_attempt(uuid4(), uuid4(), 1, created_at=T0)
+    attempt.transition_to(RunAttemptStatus.RUNNING, at=T0)
+    attempt.transition_to(RunAttemptStatus.WAITING_QUOTA, at=T2)
+    with pytest.raises(DomainError, match="updated_at"):
+        attempt.transition_to(RunAttemptStatus.RUNNING, at=T1)
+    assert attempt.status is RunAttemptStatus.WAITING_QUOTA
+    assert attempt.updated_at == T2

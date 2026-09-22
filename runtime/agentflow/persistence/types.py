@@ -4,9 +4,10 @@ UUID values are stored as canonical 36-character strings
 (``xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx``). Domain code continues to use
 ``uuid.UUID``; conversion happens only in this adapter.
 
-Timestamps are stored as ISO-8601 UTC strings ending in ``+00:00``. SQLite's
-native datetime affinity does not preserve timezone, so an explicit string
-strategy is used for restart-safe round-trips.
+Timestamps are stored as ISO-8601 UTC strings with an explicit offset
+(for example ``2026-09-22T08:00:00+00:00``). SQLite datetime affinity does
+not preserve timezone, so naive stored values are treated as corruption and
+rejected on load.
 """
 
 from datetime import UTC, datetime
@@ -37,7 +38,7 @@ class UuidAsString(TypeDecorator[UUID]):
 class UtcDateTimeAsIso(TypeDecorator[datetime]):
     """Persist timezone-aware UTC datetimes as ISO-8601 strings."""
 
-    impl = String(32)
+    impl = String(64)
     cache_ok = True
 
     def process_bind_param(
@@ -60,9 +61,10 @@ class UtcDateTimeAsIso(TypeDecorator[datetime]):
             return None
         if isinstance(value, datetime):
             if value.tzinfo is None or value.utcoffset() is None:
-                return value.replace(tzinfo=UTC)
+                raise ValueError("persisted timestamp is missing timezone information")
             return value.astimezone(UTC)
-        parsed = datetime.fromisoformat(str(value))
+        raw = str(value)
+        parsed = datetime.fromisoformat(raw)
         if parsed.tzinfo is None or parsed.utcoffset() is None:
-            return parsed.replace(tzinfo=UTC)
+            raise ValueError("persisted timestamp is missing timezone information")
         return parsed.astimezone(UTC)

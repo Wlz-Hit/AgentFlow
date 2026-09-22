@@ -7,6 +7,7 @@ from contextlib import contextmanager
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from agentflow.persistence.event_repository import SqlAlchemyEventRepository
 from agentflow.persistence.repositories import (
     SqlAlchemyAgentSessionRepository,
     SqlAlchemyJobRepository,
@@ -21,6 +22,9 @@ class SqlAlchemyUnitOfWork:
 
     Use as a context manager. Call ``commit()`` explicitly to persist. Leaving
     the context without commit rolls back. Exceptions also roll back.
+
+    Repository-level constraint translation uses SAVEPOINTs so a rejected
+    write does not silently discard unrelated pending work in the same UoW.
     """
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
@@ -31,6 +35,7 @@ class SqlAlchemyUnitOfWork:
         self.queue_items: SqlAlchemyQueueItemRepository
         self.agent_sessions: SqlAlchemyAgentSessionRepository
         self.run_attempts: SqlAlchemyRunAttemptRepository
+        self.events: SqlAlchemyEventRepository
 
     def __enter__(self) -> SqlAlchemyUnitOfWork:
         self.session = self._session_factory()
@@ -39,6 +44,7 @@ class SqlAlchemyUnitOfWork:
         self.queue_items = SqlAlchemyQueueItemRepository(self.session)
         self.agent_sessions = SqlAlchemyAgentSessionRepository(self.session)
         self.run_attempts = SqlAlchemyRunAttemptRepository(self.session)
+        self.events = SqlAlchemyEventRepository(self.session)
         return self
 
     def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
@@ -47,7 +53,6 @@ class SqlAlchemyUnitOfWork:
             if exc_type is not None:
                 self.session.rollback()
             elif self.session.in_transaction():
-                # Uncommitted work must not leak across process-style restarts.
                 self.session.rollback()
         finally:
             self.session.close()

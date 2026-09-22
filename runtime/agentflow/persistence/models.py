@@ -7,7 +7,17 @@ These models are persistence-only. Domain entities remain dataclasses under
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Index, Integer, MetaData, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from agentflow.persistence.types import UtcDateTimeAsIso, UuidAsString
@@ -40,6 +50,8 @@ class WorkflowStepRow(Base):
     __tablename__ = "workflow_steps"
     __table_args__ = (
         UniqueConstraint("job_id", "sequence", name="uq_workflow_steps_job_sequence"),
+        # Supports QueueItem composite FK (workflow_step_id, job_id).
+        UniqueConstraint("id", "job_id", name="uq_workflow_steps_id_job"),
     )
 
     id: Mapped[UUID] = mapped_column(UuidAsString(), primary_key=True)
@@ -59,7 +71,15 @@ class WorkflowStepRow(Base):
 
 class QueueItemRow(Base):
     __tablename__ = "queue_items"
-    __table_args__ = (UniqueConstraint("job_id", "sequence", name="uq_queue_items_job_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("job_id", "sequence", name="uq_queue_items_job_sequence"),
+        ForeignKeyConstraint(
+            ["workflow_step_id", "job_id"],
+            ["workflow_steps.id", "workflow_steps.job_id"],
+            name="fk_queue_items_workflow_step_job",
+            ondelete="RESTRICT",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(UuidAsString(), primary_key=True)
     job_id: Mapped[UUID] = mapped_column(
@@ -68,12 +88,7 @@ class QueueItemRow(Base):
         nullable=False,
         index=True,
     )
-    workflow_step_id: Mapped[UUID] = mapped_column(
-        UuidAsString(),
-        ForeignKey("workflow_steps.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
+    workflow_step_id: Mapped[UUID] = mapped_column(UuidAsString(), nullable=False, index=True)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -108,8 +123,6 @@ class RunAttemptRow(Base):
             "attempt_number",
             name="uq_run_attempts_queue_item_attempt_number",
         ),
-        # At most one non-terminal attempt per queue item. Quota waits resume
-        # the same row; a replacement attempt requires the previous one to end.
         Index(
             "uq_run_attempts_one_active_per_queue_item",
             "queue_item_id",
@@ -134,6 +147,24 @@ class RunAttemptRow(Base):
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTimeAsIso(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTimeAsIso(), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(UtcDateTimeAsIso(), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UtcDateTimeAsIso(), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RuntimeEventRow(Base):
+    """Append-only control-plane event history."""
+
+    __tablename__ = "runtime_events"
+
+    position: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[UUID] = mapped_column(UuidAsString(), nullable=False, unique=True)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    aggregate_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    aggregate_id: Mapped[UUID | None] = mapped_column(UuidAsString(), nullable=True, index=True)
+    job_id: Mapped[UUID | None] = mapped_column(UuidAsString(), nullable=True, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(UtcDateTimeAsIso(), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    correlation_id: Mapped[UUID | None] = mapped_column(UuidAsString(), nullable=True)
+    causation_id: Mapped[UUID | None] = mapped_column(UuidAsString(), nullable=True)
