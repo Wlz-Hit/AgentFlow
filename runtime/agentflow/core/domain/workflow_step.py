@@ -7,7 +7,12 @@ from uuid import UUID, uuid4
 from agentflow.core.domain.exceptions import DomainError
 from agentflow.core.domain.mutation import GuardsStatusAssignment
 from agentflow.core.domain.statuses import WorkflowStepStatus
-from agentflow.core.domain.time import ensure_utc, utc_now
+from agentflow.core.domain.time import (
+    ensure_utc,
+    require_not_before,
+    require_updated_at_consistent,
+    utc_now,
+)
 from agentflow.core.domain.transitions import WORKFLOW_STEP_TRANSITIONS, apply_transition
 from agentflow.core.domain.validation import require_non_negative_int, require_text
 
@@ -37,6 +42,7 @@ class WorkflowStep(GuardsStatusAssignment):
             raise DomainError("WorkflowStep status must be a WorkflowStepStatus")
         self.created_at = ensure_utc(self.created_at)
         self.updated_at = ensure_utc(self.updated_at)
+        require_updated_at_consistent(self.created_at, self.updated_at)
 
     def transition_to(
         self,
@@ -47,7 +53,12 @@ class WorkflowStep(GuardsStatusAssignment):
         """Move the step to ``new_status`` when that edge is legal."""
         if not isinstance(new_status, WorkflowStepStatus):
             raise DomainError("WorkflowStep status must be a WorkflowStepStatus")
-        moment = ensure_utc(at) if at is not None else utc_now()
+        moment = require_not_before(
+            at if at is not None else utc_now(),
+            self.updated_at,
+            label="transition time",
+            earliest_label="updated_at",
+        )
         updated = apply_transition(
             entity="WorkflowStep",
             current=self.status,

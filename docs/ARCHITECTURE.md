@@ -244,10 +244,10 @@ Future domain tables (do not create all of these yet):
 - `quota_snapshots`
 - `settings`
 
-TASK-001 established the persistence package. TASK-002 defines the domain
-objects these tables will eventually store. Those objects live in
-`runtime/agentflow/core/domain/` as plain Python. They are not SQLAlchemy
-models, and this task does not add mappings or migrations.
+TASK-001 established the persistence package. TASK-002 defined the domain
+objects. TASK-003 maps those objects to SQLite through repository ports,
+SQLAlchemy adapters, and Alembic migrations. Domain dataclasses remain separate
+from ORM models.
 
 ## 13. Why Codex must not leak into core abstractions
 
@@ -362,18 +362,124 @@ Queue items are shaped so later tasks can add `depends_on`, `condition`,
 `retry_policy`, `timeout`, and `idempotency_key` as optional fields. Those
 behaviors are not implemented here.
 
+Domain reconstruction rejects inconsistent timestamps (`updated_at` before
+`created_at`, `available_at` before `created_at`, and RunAttempt timing that
+contradicts status). Transitions may not move lifecycle timestamps backwards.
+`RunAttempt` requires `started_at` for every status except `CREATED` and
+pre-start `CANCELLED`, requires `finished_at` for terminal statuses, and
+rejects `failure_reason` unless status is `FAILED`.
+
+## 16. Durable persistence
+
+TASK-003 makes the domain model restart-safe:
+
+```text
+Domain Core
+    ↓
+Repository Port
+    ↓
+SQLAlchemy Repository
+    ↓
+SQLite
+```
+
+### Repository ports
+
+Protocols live in `runtime/agentflow/core/ports/repositories.py`:
+
+- `JobRepository`
+- `WorkflowStepRepository`
+- `QueueItemRepository`
+- `AgentSessionRepository`
+- `RunAttemptRepository`
+- `UnitOfWork`
+
+Core depends on these interfaces. SQLAlchemy implementations live only under
+`runtime/agentflow/persistence/`.
+
+### Domain ↔ ORM mapping
+
+ORM rows (`JobRow`, …) are separate from domain dataclasses. Mappers in
+`persistence/mappers.py` convert both ways. Repository methods return domain
+entities; ORM objects do not escape the persistence package.
+
+### Transaction boundary
+
+`SqlAlchemyUnitOfWork` binds every repository to one SQLAlchemy session.
+Application code calls `commit()` to persist a batch of changes atomically.
+Leaving the context without commit, or exiting with an exception, rolls back.
+This is intentionally small: one UoW per operation, not a framework.
+
+### UUID representation
+
+UUIDs are stored as canonical 36-character strings
+(`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). Domain code keeps using `uuid.UUID`.
+Adapters convert at the boundary via `UuidAsString`.
+
+### Enum representation
+
+Status columns store stable string values (`running`, `waiting_quota`,
+`completed`, …). Loading reconstructs the correct domain `StrEnum`. Ordinal
+positions are never persisted.
+
+### UTC timestamp strategy
+
+SQLite datetime affinity does not preserve timezone. Timestamps are stored as
+ISO-8601 UTC strings (for example `2026-09-22T08:00:00+00:00`) through
+`UtcDateTimeAsIso`. After save → close → reopen → load, domain objects still
+expose timezone-aware UTC datetimes.
+
+### SQLite foreign keys
+
+Foreign-key enforcement is enabled with `PRAGMA foreign_keys=ON` on every
+connection. Relationships:
+
+- `workflow_steps.job_id` → `jobs.id`
+- `queue_items.job_id` → `jobs.id`
+- `queue_items.workflow_step_id` → `workflow_steps.id`
+- `run_attempts.queue_item_id` → `queue_items.id`
+- `run_attempts.agent_session_id` → `agent_sessions.id`
+
+### Constraints and the active RunAttempt rule
+
+Notable uniqueness constraints:
+
+- `(job_id, sequence)` on workflow steps and on queue items
+- `(adapter_id, external_session_id)` on agent sessions
+- `(queue_item_id, attempt_number)` on run attempts
+
+A queue item may have many historical attempts, but **at most one non-terminal
+RunAttempt** at a time. Quota interruption resumes the same attempt
+(`RUNNING → WAITING_QUOTA → RUNNING`). Creating a replacement attempt requires
+the previous one to become terminal (`CANCELLED` or `FAILED`). Enforcement:
+
+1. Application check in `SqlAlchemyRunAttemptRepository.save`
+2. Partial unique index `uq_run_attempts_one_active_per_queue_item` on
+   `queue_item_id` where `status NOT IN ('completed', 'failed', 'cancelled')`
+
+### Restart recovery implications
+
+Process stop/start must not lose or corrupt domain state. Durable writes go
+through the UoW commit path. Reloaded entities re-run domain validation, so
+corrupt rows fail loudly instead of silently becoming invalid in-memory
+objects. Scheduler and recovery engines (not yet implemented) will open a UoW,
+load entities, apply domain transitions, and commit.
+
+Schema changes ship as Alembic revisions under `runtime/alembic/versions/`.
+`metadata.create_all()` is not the production migration strategy.
+
 ---
 
-## Current status (TASK-002)
+## Current status (TASK-003)
 
 Implemented:
 
 - monorepo layout (pnpm workspace + Python runtime)
 - FastAPI `/health` at the API edge
 - React/Electron desktop skeleton
-- persistence package placeholder
-- adapter package placeholder for Codex
 - provider-independent domain model and lifecycle transitions (TASK-002)
+- domain invariant hardening for timestamps and RunAttempt consistency
+- repository ports, SQLAlchemy adapters, Alembic domain migration (TASK-003)
 - this document, `AGENTS.md`, and Cursor architecture rules
 
 Not implemented (intentionally):
@@ -381,6 +487,5 @@ Not implemented (intentionally):
 - Codex SDK, login, quota monitoring
 - Prompt Queue dispatcher, Scheduler loop, Recovery Engine, workflow DAG behavior
 - Claude / Gemini support
-- SQLAlchemy mappings and migrations for the domain model
 - WebSocket event stream
 - cloud sync, accounts, payments, licensing, telemetry, auto-update

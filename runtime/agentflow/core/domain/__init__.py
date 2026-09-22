@@ -15,6 +15,7 @@ from agentflow.core.domain.statuses import (
     QueueItemStatus,
     RunAttemptStatus,
     WorkflowStepStatus,
+    is_active_run_attempt_status,
     is_recoverable_status,
     is_terminal_status,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "create_queue_item",
     "create_run_attempt",
     "create_workflow_step",
+    "is_active_run_attempt_status",
     "is_recoverable_status",
     "is_terminal_status",
 ]

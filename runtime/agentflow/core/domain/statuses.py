@@ -98,3 +98,8 @@ def is_terminal_status(status: StrEnum) -> bool:
 def is_recoverable_status(status: StrEnum) -> bool:
     """Return whether the status is an interruption that can resume later."""
     return status.value in _RECOVERABLE_VALUES
+
+
+def is_active_run_attempt_status(status: RunAttemptStatus) -> bool:
+    """Return whether the attempt still occupies the queue item's active slot."""
+    return not is_terminal_status(status)

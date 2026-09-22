@@ -92,12 +92,30 @@ def _session(status: AgentSessionStatus) -> AgentSession:
 
 
 def _attempt(status: RunAttemptStatus) -> RunAttempt:
+    """Build a RunAttempt already in ``status`` with consistent timestamps."""
+    started: datetime | None
+    finished: datetime | None
+    if status is RunAttemptStatus.CREATED:
+        started = None
+        finished = None
+    elif status is RunAttemptStatus.CANCELLED:
+        # Cancellation before start is a valid terminal path.
+        started = None
+        finished = T0
+    elif is_terminal_status(status):
+        started = T0
+        finished = T0
+    else:
+        started = T0
+        finished = None
     return RunAttempt(
         id=uuid4(),
         queue_item_id=uuid4(),
         agent_session_id=uuid4(),
         attempt_number=1,
         created_at=T0,
+        started_at=started,
+        finished_at=finished,
         status=status,
     )
 
@@ -367,3 +385,127 @@ def test_transition_rejects_a_status_from_another_entity() -> None:
     with pytest.raises(DomainError, match="JobStatus"):
         job.transition_to(RunAttemptStatus.RUNNING, at=T1)  # type: ignore[arg-type]
     assert job.status is JobStatus.CREATED
+
+
+def test_updated_at_before_created_at_is_rejected() -> None:
+    with pytest.raises(DomainError, match="updated_at"):
+        Job(
+            id=uuid4(),
+            title="Title",
+            description="",
+            created_at=T1,
+            updated_at=T0,
+        )
+
+
+def test_available_at_before_created_at_is_rejected() -> None:
+    with pytest.raises(DomainError, match="available_at"):
+        QueueItem(
+            id=uuid4(),
+            job_id=uuid4(),
+            workflow_step_id=uuid4(),
+            sequence=0,
+            prompt="Prompt",
+            created_at=T1,
+            available_at=T0,
+            updated_at=T1,
+        )
+
+
+def test_transition_must_not_move_timestamps_backwards() -> None:
+    job = _job(JobStatus.CREATED)
+    job.transition_to(JobStatus.READY, at=T1)
+    with pytest.raises(DomainError, match="transition time"):
+        job.transition_to(JobStatus.RUNNING, at=T0)
+    assert job.status is JobStatus.READY
+    assert job.updated_at == T1
+
+
+@pytest.mark.parametrize(
+    ("status", "kwargs", "match"),
+    [
+        (
+            RunAttemptStatus.CREATED,
+            {"finished_at": T0},
+            "CREATED",
+        ),
+        (
+            RunAttemptStatus.RUNNING,
+            {"started_at": T0, "finished_at": T0},
+            "finished_at",
+        ),
+        (
+            RunAttemptStatus.COMPLETED,
+            {"started_at": T0},
+            "finished_at",
+        ),
+        (
+            RunAttemptStatus.FAILED,
+            {"started_at": T0},
+            "finished_at",
+        ),
+        (
+            RunAttemptStatus.WAITING_QUOTA,
+            {},
+            "started_at",
+        ),
+        (
+            RunAttemptStatus.WAITING_USER,
+            {},
+            "started_at",
+        ),
+        (
+            RunAttemptStatus.PAUSED,
+            {},
+            "started_at",
+        ),
+        (
+            RunAttemptStatus.RUNNING,
+            {"started_at": T0, "failure_reason": "nope"},
+            "failure_reason",
+        ),
+    ],
+)
+def test_run_attempt_rejects_inconsistent_reconstruction(
+    status: RunAttemptStatus,
+    kwargs: dict,
+    match: str,
+) -> None:
+    with pytest.raises(DomainError, match=match):
+        RunAttempt(
+            id=uuid4(),
+            queue_item_id=uuid4(),
+            agent_session_id=uuid4(),
+            attempt_number=1,
+            created_at=T0,
+            status=status,
+            **kwargs,
+        )
+
+
+def test_cancelled_before_start_is_valid() -> None:
+    attempt = RunAttempt(
+        id=uuid4(),
+        queue_item_id=uuid4(),
+        agent_session_id=uuid4(),
+        attempt_number=1,
+        created_at=T0,
+        finished_at=T1,
+        status=RunAttemptStatus.CANCELLED,
+    )
+    assert attempt.started_at is None
+    assert attempt.finished_at == T1
+
+
+def test_failed_without_failure_reason_is_allowed() -> None:
+    attempt = RunAttempt(
+        id=uuid4(),
+        queue_item_id=uuid4(),
+        agent_session_id=uuid4(),
+        attempt_number=1,
+        created_at=T0,
+        started_at=T0,
+        finished_at=T1,
+        status=RunAttemptStatus.FAILED,
+    )
+    assert attempt.failure_reason is None

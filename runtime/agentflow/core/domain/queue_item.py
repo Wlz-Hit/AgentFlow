@@ -7,7 +7,12 @@ from uuid import UUID, uuid4
 from agentflow.core.domain.exceptions import DomainError
 from agentflow.core.domain.mutation import GuardsStatusAssignment
 from agentflow.core.domain.statuses import QueueItemStatus
-from agentflow.core.domain.time import ensure_utc, utc_now
+from agentflow.core.domain.time import (
+    ensure_utc,
+    require_not_before,
+    require_updated_at_consistent,
+    utc_now,
+)
 from agentflow.core.domain.transitions import QUEUE_ITEM_TRANSITIONS, apply_transition
 from agentflow.core.domain.validation import require_non_negative_int, require_text
 
@@ -41,6 +46,9 @@ class QueueItem(GuardsStatusAssignment):
         self.created_at = ensure_utc(self.created_at)
         self.available_at = ensure_utc(self.available_at)
         self.updated_at = ensure_utc(self.updated_at)
+        require_updated_at_consistent(self.created_at, self.updated_at)
+        if self.available_at < self.created_at:
+            raise DomainError("available_at must not be earlier than created_at")
 
     def transition_to(
         self,
@@ -51,7 +59,12 @@ class QueueItem(GuardsStatusAssignment):
         """Move the queue item to ``new_status`` when that edge is legal."""
         if not isinstance(new_status, QueueItemStatus):
             raise DomainError("QueueItem status must be a QueueItemStatus")
-        moment = ensure_utc(at) if at is not None else utc_now()
+        moment = require_not_before(
+            at if at is not None else utc_now(),
+            self.updated_at,
+            label="transition time",
+            earliest_label="updated_at",
+        )
         updated = apply_transition(
             entity="QueueItem",
             current=self.status,
